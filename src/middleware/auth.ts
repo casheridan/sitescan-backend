@@ -1,11 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase } from '../config/supabase.js';
 
-export async function authenticateUser(
+export const authenticateUser = async (
   req: Request,
   res: Response,
   next: NextFunction
-): Promise<void> {
+) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -20,7 +20,6 @@ export async function authenticateUser(
     }
 
     const { data: { user }, error } = await supabase.auth.getUser(token);
-
     if (error || !user) {
       res.status(401).json({ error: 'Invalid token' });
       return;
@@ -30,7 +29,7 @@ export async function authenticateUser(
     req.user = user;
     next();
   } catch (error) {
-    console.error('Authentication error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Auth error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
   }
-} 
+}; 

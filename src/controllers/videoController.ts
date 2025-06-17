@@ -1,55 +1,168 @@
 import { Request, Response } from 'express';
-import { VideoStorageService } from '../services/video-storage/VideoStorageService';
-import { VideoMetadata } from '../services/video-storage/VideoStorageService';
+import { VideoStorageService } from '../services/video-storage/VideoStorageService.js';
+import { VideoMetadata } from '../services/video-storage/VideoStorageService.js';
+import { videoStorageService } from '../config/videoStorage.js';
+import { PassThrough } from 'stream';
 
 export class VideoController {
-  constructor(private videoService: VideoStorageService) {}
+  constructor(private videoService: VideoStorageService = videoStorageService) {}
 
   async uploadVideo(req: Request, res: Response): Promise<void> {
     try {
+      console.log('Upload request received:', {
+        hasFile: !!req.file,
+        fileInfo: req.file ? {
+          originalname: req.file.originalname,
+          mimetype: req.file.mimetype,
+          size: req.file.size
+        } : null,
+        user: req.user ? {
+          id: req.user.id,
+          email: req.user.email
+        } : null,
+        headers: req.headers
+      });
+
       if (!req.file) {
+        console.error('No file provided in request');
         res.status(400).json({ error: 'No video file provided' });
         return;
       }
 
       if (!req.user?.id) {
+        console.error('No user ID in request');
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
 
-      const metadata = await this.videoService.uploadVideo(
-        req.user.id,
-        req.file.buffer,
-        {
-          userId: req.user.id,
-          originalName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          size: req.file.size,
-          status: 'pending',
-        }
-      );
+      try {
+        console.log('Starting video upload to storage service...');
+        const metadata = await this.videoService.uploadVideo(
+          req.user.id,
+          req.file.buffer,
+          {
+            userId: req.user.id,
+            originalName: req.file.originalname,
+            mimeType: req.file.mimetype,
+            size: req.file.size,
+            status: 'pending',
+          }
+        );
 
-      res.status(201).json(metadata);
+        console.log('Video uploaded successfully:', metadata);
+        res.status(201).json(metadata);
+      } catch (uploadError) {
+        console.error('Error in videoService.uploadVideo:', {
+          error: uploadError,
+          message: uploadError instanceof Error ? uploadError.message : 'Unknown error',
+          stack: uploadError instanceof Error ? uploadError.stack : undefined
+        });
+        throw uploadError; // Re-throw to be caught by outer try-catch
+      }
     } catch (error) {
-      console.error('Error uploading video:', error);
-      res.status(500).json({ error: 'Failed to upload video' });
+      console.error('Error uploading video:', {
+        error,
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      res.status(500).json({ 
+        error: 'Failed to upload video',
+        details: error instanceof Error ? error.message : 'Unknown error',
+        type: error instanceof Error ? error.constructor.name : typeof error
+      });
     }
   }
 
   async getVideo(req: Request, res: Response): Promise<void> {
     try {
       const { id } = req.params;
-      const { stream, metadata } = await this.videoService.getVideo(id);
+      console.log('Getting video:', id, {
+        headers: req.headers,
+        user: req.user ? { id: req.user.id } : null
+      });
 
-      // Set appropriate headers
-      res.setHeader('Content-Type', metadata.mimeType);
-      res.setHeader('Content-Disposition', `inline; filename="${metadata.originalName}"`);
+      if (!req.user?.id) {
+        console.error('No user ID in request');
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
 
-      // Pipe the video stream to the response
-      stream.pipe(res);
+      try {
+        const { stream, metadata } = await this.videoService.getVideo(id);
+        console.log('Got video stream and metadata:', {
+          mimeType: metadata.mimeType,
+          originalName: metadata.originalName,
+          size: metadata.size
+        });
+
+        // Set appropriate headers
+        res.setHeader('Content-Type', metadata.mimeType);
+        res.setHeader('Content-Disposition', `inline; filename="${metadata.originalName}"`);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Range');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Content-Type');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.setHeader('Accept-Ranges', 'bytes');
+
+        // Handle range requests
+        const range = req.headers.range;
+        if (range) {
+          console.log('Handling range request:', range);
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : metadata.size - 1;
+          const chunkSize = end - start + 1;
+
+          res.setHeader('Content-Range', `bytes ${start}-${end}/${metadata.size}`);
+          res.setHeader('Content-Length', chunkSize.toString());
+          res.status(206);
+
+          // Create a read stream for the specific range
+          const readStream = stream.pipe(new PassThrough());
+          readStream.on('error', (error) => {
+            console.error('Stream error:', error);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Stream error' });
+            }
+          });
+
+          readStream.pipe(res);
+        } else {
+          console.log('Streaming entire file');
+          // Stream the entire file
+          stream.on('error', (error) => {
+            console.error('Stream error:', error);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Stream error' });
+            }
+          });
+
+          stream.on('end', () => {
+            console.log('Stream ended successfully');
+          });
+
+          stream.pipe(res);
+        }
+
+        console.log('Video stream piped to response');
+      } catch (streamError) {
+        console.error('Error streaming video:', streamError);
+        if (!res.headersSent) {
+          res.status(500).json({ 
+            error: 'Failed to stream video',
+            details: streamError instanceof Error ? streamError.message : 'Unknown error'
+          });
+        }
+      }
     } catch (error) {
       console.error('Error getting video:', error);
-      res.status(500).json({ error: 'Failed to get video' });
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          error: 'Failed to get video',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
     }
   }
 
@@ -89,15 +202,30 @@ export class VideoController {
   async getTemporaryUrl(req: Request, res: Response): Promise<void> {
     try {
       const { id } = req.params;
+      console.log('Getting temporary URL for video:', id);
+
+      if (!req.user?.id) {
+        console.error('No user ID in request');
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
       const { expiresIn } = req.query;
+      console.log('Expires in:', expiresIn);
+
       const url = await this.videoService.getTemporaryUrl(
         id,
         expiresIn ? parseInt(expiresIn as string) : undefined
       );
+
+      console.log('Generated temporary URL successfully');
       res.json({ url });
     } catch (error) {
-      console.error('Error getting temporary URL:', error);
-      res.status(500).json({ error: 'Failed to get temporary URL' });
+      console.error('Error generating temporary URL:', error);
+      res.status(500).json({ 
+        error: 'Failed to generate temporary URL',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
   }
 
@@ -129,7 +257,7 @@ export class VideoController {
       res.json(result);
     } catch (error) {
       console.error('Error listing user videos:', error);
-      res.status(500).json({ error: 'Failed to list user videos' });
+      res.status(500).json({ error: 'Failed to list videos' });
     }
   }
 } 

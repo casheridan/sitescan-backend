@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { VideoController } from '../controllers/videoController';
+import { VideoController } from '../controllers/videoController.js';
 import multer from 'multer';
-import { authenticateUser } from '../middleware/auth';
+import { authenticateUser } from '../middleware/auth.js';
 
 const router = Router();
 const upload = multer({
@@ -74,6 +74,13 @@ export function createVideoRoutes(videoController: VideoController) {
     '/',
     authenticateUser,
     videoController.listUserVideos.bind(videoController)
+  );
+
+  // Proxy endpoint for video streaming
+  router.get(
+    '/proxy/:id',
+    authenticateUser,
+    videoController.getVideo.bind(videoController)
   );
 
   return router;

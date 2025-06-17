@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { VideoMetadata, VideoStorageService } from './VideoStorageService';
+import { VideoMetadata, VideoStorageService } from './VideoStorageService.js';
 import { createReadStream, createWriteStream } from 'fs';
 import { mkdir, writeFile, readFile, unlink } from 'fs/promises';
 import { join } from 'path';
@@ -13,7 +13,21 @@ export abstract class BaseVideoStorageService implements VideoStorageService {
       region?: string;
       tempDir: string;
     }
-  ) {}
+  ) {
+    // Ensure temp directory exists
+    this.ensureTempDir();
+  }
+
+  private async ensureTempDir() {
+    try {
+      console.log('Checking temp directory:', this.config.tempDir);
+      await mkdir(this.config.tempDir, { recursive: true });
+      console.log('Temp directory is ready');
+    } catch (error) {
+      console.error('Error creating temp directory:', error);
+      throw new Error(`Failed to create temp directory: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
 
   protected abstract uploadToStorage(
     path: string,
@@ -40,27 +54,37 @@ export abstract class BaseVideoStorageService implements VideoStorageService {
     file: Buffer,
     metadata: Omit<VideoMetadata, 'id' | 'uploadDate' | 'storagePath' | 'thumbnailPath' | 'userId'>
   ): Promise<VideoMetadata> {
-    const id = uuidv4();
-    const storagePath = `videos/${userId}/${id}/${metadata.originalName}`;
-    const thumbnailPath = `thumbnails/${userId}/${id}/thumbnail.jpg`;
+    try {
+      console.log('Starting video upload process:', {
+        userId,
+        originalName: metadata.originalName,
+        mimeType: metadata.mimeType,
+        size: metadata.size
+      });
 
-    // Upload the video file
-    await this.uploadToStorage(storagePath, file, metadata.mimeType);
+      const id = uuidv4();
+      const storagePath = `videos/${userId}/${id}/${metadata.originalName}`;
 
-    // Generate and upload thumbnail
-    const thumbnailBuffer = await this.generateThumbnailBuffer(file);
-    await this.uploadToStorage(thumbnailPath, thumbnailBuffer, 'image/jpeg');
+      // Upload the video file
+      console.log('Uploading video file to storage...');
+      await this.uploadToStorage(storagePath, file, metadata.mimeType);
+      console.log('Video file uploaded successfully');
 
-    const videoMetadata: VideoMetadata = {
-      id,
-      userId,
-      ...metadata,
-      uploadDate: new Date(),
-      storagePath,
-      thumbnailPath,
-    };
+      const videoMetadata: VideoMetadata = {
+        id,
+        userId,
+        ...metadata,
+        uploadDate: new Date(),
+        storagePath,
+        thumbnailPath: undefined, // No thumbnail for now
+      };
 
-    return videoMetadata;
+      console.log('Video upload process completed successfully');
+      return videoMetadata;
+    } catch (error) {
+      console.error('Error in uploadVideo:', error);
+      throw error;
+    }
   }
 
   async getVideo(id: string): Promise<{
@@ -149,40 +173,5 @@ export abstract class BaseVideoStorageService implements VideoStorageService {
   }> {
     // This should be implemented by the concrete class to fetch from your database
     throw new Error('Method not implemented.');
-  }
-
-  private async generateThumbnailBuffer(videoBuffer: Buffer): Promise<Buffer> {
-    // Create temp directory if it doesn't exist
-    await mkdir(this.config.tempDir, { recursive: true });
-    
-    const tempVideoPath = join(this.config.tempDir, `temp_${Date.now()}.mp4`);
-    const tempThumbnailPath = join(this.config.tempDir, `temp_${Date.now()}_thumb.jpg`);
-
-    // Save video to temp file
-    await writeFile(tempVideoPath, videoBuffer);
-
-    // Generate thumbnail using ffmpeg
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(tempVideoPath)
-        .screenshots({
-          timestamps: ['00:00:01'],
-          filename: `temp_${Date.now()}_thumb.jpg`,
-          folder: this.config.tempDir,
-          size: '320x240'
-        })
-        .on('end', () => resolve())
-        .on('error', reject);
-    });
-
-    // Read thumbnail file
-    const thumbnailBuffer = await readFile(tempThumbnailPath);
-
-    // Clean up temp files
-    await Promise.all([
-      unlink(tempVideoPath),
-      unlink(tempThumbnailPath)
-    ]);
-
-    return thumbnailBuffer;
   }
 } 
